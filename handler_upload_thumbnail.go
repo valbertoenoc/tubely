@@ -1,10 +1,15 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -36,19 +41,12 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	const maxMemory = 10 << 20
 	r.ParseMultipartForm(maxMemory)
 
-	file, header, err := r.FormFile("thumbnail")
+	multipartFile, header, err := r.FormFile("thumbnail")
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Unable to parse form file", err)
 		return
 	}
-	defer file.Close()
-
-	mediaType := header.Header.Get("Content-Type")
-	imageData, err := io.ReadAll(file)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Unable to read file content", err)
-		return
-	}
+	defer multipartFile.Close()
 
 	video, err := cfg.db.GetVideo(videoID)
 	if err != nil {
@@ -60,8 +58,27 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	encodedImage := base64.StdEncoding.EncodeToString(imageData)
-	newURL := fmt.Sprintf("data:%s;base64,%s", mediaType, encodedImage)
+	mediaType := header.Header.Get("Content-Type")
+	mediaType, _, _ = mime.ParseMediaType(mediaType)
+	if mediaType != "image/png" && mediaType != "image/jpeg" {
+		respondWithError(w, http.StatusBadRequest, "Only image files are allowed: [png, jpeg]", err)
+		return
+	}
+
+	parts := strings.Split(mediaType, "/")
+	ext := parts[1]
+	key := make([]byte, 32)
+	rand.Read(key)
+	randomString := base64.RawURLEncoding.EncodeToString(key)
+	thumbnailFilePath := filepath.Join(cfg.assetsRoot, fmt.Sprintf("%s.%s", randomString, ext))
+	file, err := os.Create(thumbnailFilePath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to create image file", err)
+		return
+	}
+	io.Copy(file, multipartFile)
+
+	newURL := fmt.Sprintf("http://localhost:%s/assets/%s.%s", cfg.port, randomString, ext)
 	video.ThumbnailURL = &newURL
 
 	err = cfg.db.UpdateVideo(video)
